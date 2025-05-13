@@ -12,6 +12,7 @@ mod compiler;
 mod parser;
 mod uno_ir;
 mod uno_std;
+mod lang;
 
 fn main() {
     let code = r#"
