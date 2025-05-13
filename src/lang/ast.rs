@@ -4,6 +4,7 @@ pub enum Statement {
     /// function declaration
     FuncDecl(Func),
     Return(Expression),
+    EmptyLine
 }
 
 #[derive(Debug, PartialEq)]
@@ -29,24 +30,28 @@ pub struct Func {
 }
 
 peg::parser! {
-    grammar expr_parser() for str {
+    pub grammar expr_parser() for str {
         // FIXME: make string working with escaped "
-        pub rule str_const() -> String
-            = "\"" s:$([^ '\n' | '"']* )  "\"" { s.to_owned() }
+        pub rule str_const() -> Expression
+            = "\"" s:$([^ '\n' | '"']* )  "\"" { Expression::StrConst(s.to_owned()) }
 
-        pub rule n_const() -> String
+        pub rule n_const() -> Expression
             = n_const_dec()
             / n_const_hex()
             / n_const_bin()
 
-        pub rule n_const_dec() -> String
-            = !("0" ['x' | 'b']) n:$(['0'..='9' | '_']*) { n.to_owned() }
+        pub rule expr() -> Expression
+            = str_const()
+            / n_const()
 
-        pub rule n_const_hex() -> String
-            = n:$("0x" ['0'..='9' | 'a'..='f' | 'A'..='F' | '_']*) { n.to_owned() }
+        pub rule n_const_dec() -> Expression
+            = !("0" ['x' | 'b']) n:$(['0'..='9' | '_']*) { Expression::NConst(n.to_owned()) }
 
-        pub rule n_const_bin() -> String
-            = n:$("0b" ['0' | '1' | '_']*) { n.to_owned() }
+        pub rule n_const_hex() -> Expression
+            = n:$("0x" ['0'..='9' | 'a'..='f' | 'A'..='F' | '_']*) { Expression::NConst(n.to_owned()) }
+
+        pub rule n_const_bin() -> Expression
+            = n:$("0b" ['0' | '1' | '_']*) { Expression::NConst(n.to_owned()) }
 
         pub rule ident() -> String
             = i:$(['a'..='z' | 'A'..='Z' | '_' | '$'] ['a'..='z' | 'A'..='Z' | '_' | '$' | '0'..='9']*) { i.to_owned() }
@@ -56,21 +61,44 @@ peg::parser! {
 
         pub rule func() -> Func
             = _ "fn" _ name:ident() "(" aa:fn_args() ")" _ rty:type_()? _ "{" "\n"?
-            (_ "\n")*
-            _ "}"
-            { Func{ name: name.to_owned(), args: aa, ret: rty.unwrap_or(UType::Nothing), body: vec![] } }
+            body:statements()
+            _ "}\n"
+            { Func{ name: name.to_owned(), args: aa, ret: rty.unwrap_or(UType::Nothing), body } }
 
         rule fn_args() -> Vec<(String, UType)>
-            = aa:(fn_arg()) ** ("," _) { aa }
+            = aa:(fn_arg()) ** (","  _) { aa }
 
         rule fn_arg() -> (String, UType)
-            = name:ident() "," _ ty:type_() { (name, ty) }
+            = name:ident() " " _ ty:type_() { (name, ty) }
 
-        rule statements() -> Vec<Statement>
+        pub rule statements() -> Vec<Statement>
             = stmts:(statement()*)
-            { stmts }
+            {
+                let mut res = Vec::with_capacity(stmts.len());
+                for s in stmts {
+                    if s != Statement::EmptyLine {
+                        res.push(s);
+                    }
+                }
+                res
+            }
+
+        rule statement() -> Statement
+            = func_decl()
+            / ret_decl()
+            / empty_line()
+
+        rule maybe_statement() -> Option<Statement>
+            = stmt:statement()?
+            { stmt }
+
+        rule func_decl() -> Statement = fn_:func() { Statement::FuncDecl(fn_) }
+
+        rule ret_decl() -> Statement = _ "return " _ rexpr:expr() _ "\n" { Statement::Return(rexpr) }
 
         rule _() = quiet!{[' ' | '\t']*}
+
+        rule empty_line() -> Statement = _ "\n" { Statement::EmptyLine }
     }
 }
 
@@ -84,11 +112,11 @@ mod test {
     fn str_const_test() {
         assert_eq!(
             expr_parser::str_const("\"\"").expect("should parse empty string"),
-            "".to_owned()
+            Expression::StrConst("".to_owned())
         );
         assert_eq!(
             expr_parser::str_const("\"hi\"").expect("should parse non-empty string"),
-            "hi".to_owned()
+            Expression::StrConst("hi".to_owned())
         );
         // FIXME:
         //        assert_eq!(
@@ -106,23 +134,23 @@ mod test {
         // decimal
         assert_eq!(
             expr_parser::n_const("01235").expect("should capture decimal number"),
-            "01235"
+            Expression::NConst("01235".to_owned())
         );
         assert_eq!(
             expr_parser::n_const("1_235_000")
                 .expect("should capture decimal number with separator"),
-            "1_235_000"
+            Expression::NConst("1_235_000".to_owned())
         );
         // hexadecimal
         assert_eq!(
             expr_parser::n_const("0x12_3456_789abc_defAB_CDEF")
                 .expect("should capture hexadecimal number"),
-            "0x12_3456_789abc_defAB_CDEF"
+            Expression::NConst("0x12_3456_789abc_defAB_CDEF".to_owned())
         );
         // binary
         assert_eq!(
             expr_parser::n_const("0b011_111").expect("should capture binary number"),
-            "0b011_111"
+            Expression::NConst("0b011_111".to_owned())
         );
         assert!(
             expr_parser::n_const("0b0121_111").is_err(),
@@ -157,12 +185,13 @@ mod test {
     #[test]
     fn func_test() {
         assert!(
-            expr_parser::func("fn () {}").is_err(),
+            expr_parser::func("fn () {}\n").is_err(),
             "should not match a non-func expression"
         );
 
         assert_eq!(
-            expr_parser::func("fn main() {}").expect("should match function"),
+            expr_parser::func("fn main() {}\n")
+                .expect("should match function with empty body and no return type"),
             Func {
                 name: "main".to_owned(),
                 args: vec![],
@@ -171,7 +200,8 @@ mod test {
             }
         );
         assert_eq!(
-            expr_parser::func("fn main()       i64    {\n\n\t\t}").expect("should match function"),
+            expr_parser::func("fn main()       i64    {\n\n\t\t}\n")
+                .expect("should match function with empty body"),
             Func {
                 name: "main".to_owned(),
                 args: vec![],
@@ -180,7 +210,8 @@ mod test {
             }
         );
         assert_eq!(
-            expr_parser::func("fn main() i64 {\nreturn 12\n").expect("should match function"),
+            expr_parser::func("fn main() i64 {\nreturn 12\n}\n")
+                .expect("should match function with return"),
             Func {
                 name: "main".to_owned(),
                 args: vec![],
