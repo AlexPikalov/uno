@@ -3,8 +3,8 @@
 pub enum Statement {
     /// function declaration
     FuncDecl(Func),
-    Return(Expression),
-    EmptyLine
+    Return(Option<Expression>),
+    EmptyLine,
 }
 
 #[derive(Debug, PartialEq)]
@@ -13,6 +13,13 @@ pub enum Expression {
     NConst(String),
     /// String constant
     StrConst(String),
+    /// Identifier
+    Ident(String),
+    /// Function Call
+    FuncCall {
+        fn_name: String,
+        args: Vec<Expression>,
+    },
 }
 
 #[derive(Debug, PartialEq)]
@@ -43,6 +50,8 @@ peg::parser! {
         pub rule expr() -> Expression
             = str_const()
             / n_const()
+            / func_call()
+            / ident_expr()
 
         pub rule n_const_dec() -> Expression
             = !("0" ['x' | 'b']) n:$(['0'..='9' | '_']*) { Expression::NConst(n.to_owned()) }
@@ -56,11 +65,13 @@ peg::parser! {
         pub rule ident() -> String
             = i:$(['a'..='z' | 'A'..='Z' | '_' | '$'] ['a'..='z' | 'A'..='Z' | '_' | '$' | '0'..='9']*) { i.to_owned() }
 
+        pub rule ident_expr() -> Expression = id:ident() {Expression::Ident(id)}
+
         pub rule type_() -> UType
             = "i64" { UType::I64 }
 
         pub rule func() -> Func
-            = _ "fn" _ name:ident() "(" aa:fn_args() ")" _ rty:type_()? _ "{" "\n"?
+            = _ "fn" _ name:ident() "(" _ aa:fn_args() _ ")" _ rty:type_()? _ "{" "\n"?
             body:statements()
             _ "}\n"
             { Func{ name: name.to_owned(), args: aa, ret: rty.unwrap_or(UType::Nothing), body } }
@@ -83,6 +94,10 @@ peg::parser! {
                 res
             }
 
+        pub rule func_call() -> Expression
+            = name:ident() "(" _ aa:(expr()) ** (_ "," _) _ ")"
+            { Expression::FuncCall { fn_name: name, args: aa } }
+
         rule statement() -> Statement
             = func_decl()
             / ret_decl()
@@ -94,7 +109,7 @@ peg::parser! {
 
         rule func_decl() -> Statement = fn_:func() { Statement::FuncDecl(fn_) }
 
-        rule ret_decl() -> Statement = _ "return " _ rexpr:expr() _ "\n" { Statement::Return(rexpr) }
+        rule ret_decl() -> Statement = _ "return " _ rexpr:expr()? _ "\n" { Statement::Return(rexpr) }
 
         rule _() = quiet!{[' ' | '\t']*}
 
@@ -216,7 +231,47 @@ mod test {
                 name: "main".to_owned(),
                 args: vec![],
                 ret: UType::I64,
-                body: vec![Statement::Return(Expression::NConst("12".to_owned()))]
+                body: vec![Statement::Return(Some(Expression::NConst("12".to_owned())))]
+            }
+        );
+    }
+
+    #[test]
+    fn func_call_test() {
+        assert_eq!(
+            expr_parser::func_call("hello(1, \"world\", some_id)").expect("should match function call"),
+            Expression::FuncCall {
+                fn_name: "hello".to_owned(),
+                args: vec![
+                    Expression::NConst("1".to_owned()),
+                    Expression::StrConst("world".to_owned()),
+                    Expression::Ident("some_id".to_owned())
+                ]
+            }
+        );
+        assert_eq!(
+            expr_parser::expr("hello(1, \"world\")").expect("should match function call expression"),
+            Expression::FuncCall {
+                fn_name: "hello".to_owned(),
+                args: vec![
+                    Expression::NConst("1".to_owned()),
+                    Expression::StrConst("world".to_owned())
+                ]
+            }
+        );
+        assert_eq!(
+            expr_parser::func_call("hello(\"world\")").expect("should match function call"),
+            Expression::FuncCall {
+                fn_name: "hello".to_owned(),
+                args: vec![Expression::StrConst("world".to_owned())]
+            }
+        );
+        assert_eq!(
+            expr_parser::func_call("return hello(\"world\")\n")
+                .expect("should match returned function call"),
+            Expression::FuncCall {
+                fn_name: "hello".to_owned(),
+                args: vec![Expression::StrConst("world".to_owned())]
             }
         );
     }
